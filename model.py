@@ -3,10 +3,9 @@ import pickle
 import pandas as pd
 import numpy as np
 import scipy.sparse as sp
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold
 from sentence_transformers import SentenceTransformer
 from sklearn.linear_model import LogisticRegression
-from sklearn.svm import LinearSVC
 from sklearn.metrics import classification_report
 
 model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
@@ -23,19 +22,15 @@ def get_attrs(row, attr):
         results.append(mem['name'])
     return results
 
-def classifier(train_df, test_df, train_embeddings, test_embeddings):
-    y_train = train_df['director']
-    y_test = test_df['director']
-
-    clf = LinearSVC(max_iter=3000, class_weight='balanced', C=0.1)
-    clf.fit(train_embeddings, y_train)
-    y_pred = clf.predict(test_embeddings)
-
-    print(f"Accuracy: {(sum(y_pred == y_test)) / len(y_test):.4f}")
-    print(classification_report(y_test, y_pred, zero_division=0))
-    pickle.dump(clf, open('model/director_classifier.sav', 'wb'))
+def build_input(row):
+    overview = row.get('overview', '') or ''
+    genres = ' '.join(row.get('genre_names', []))
+    title = row.get('original_title', '') or ''
+    keywords = ' '.join(row.get('keyword_names', []))
+    return f"{overview} {genres} {title} {keywords}".strip()
 
 if __name__ == "__main__":
+    # combine datasets 
     credits_df = pd.read_csv("data/tmdb_5000_credits.csv")
     movies_df = pd.read_csv("data/tmdb_5000_movies.csv")
     df = pd.merge(movies_df, credits_df, left_on="id", right_on="movie_id")
@@ -59,26 +54,34 @@ if __name__ == "__main__":
     #get genre
     df['genres'] = df['genres'].apply(ast.literal_eval)
     df['genre_names'] = df.apply(get_attrs, args=("genres",), axis=1)
-    
-    print("Size of origninal df:", df.size)
 
-    train, test = train_test_split(df, test_size=0.1, random_state=100, shuffle=True, stratify=df['director'])
+    # get keywords
+    df['keywords'] = df['keywords'].apply(ast.literal_eval)
+    df['keyword_names'] = df.apply(get_attrs, args=("keywords",), axis=1)
 
-    print("Size of train df:", train.size)
-    print("Size of test df:", test.size)
+    df['input'] = df.apply(build_input, axis=1)
 
-    train_overviews = train['overview'].tolist()
-    train_embeddings = model.encode(train_overviews)
+    df = df.reset_index(drop=True)
+    embeddings = model.encode(df['input'].tolist(), show_progress_bar=True)
+    np.save('model/embeddings.npy', embeddings)
 
-    test_overviews = test['overview'].tolist()
-    test_embeddings = model.encode(test_overviews)
+    train, test = train_test_split(df, test_size=0.1, random_state=100)
+    test = test[test['director'].isin(set(train['director']))]
 
-    # save
-    np.save('model/train_embeddings.npy', train_embeddings)
-    np.save('model/test_embeddings.npy', test_embeddings)
+    lr = LogisticRegression(max_iter=1000, class_weight='balanced', C=0.5)
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=100)
+    scores = cross_val_score(lr, embeddings, df['director'], cv=skf, scoring='accuracy')
+    print(f"CV accuracy: {scores.mean():.3f} (std: {scores.std():.3f})")
+
+    lr.fit(embeddings[train.index], train['director'])
+    pickle.dump(lr, open('model/cross_classifier.sav', 'wb'))
+
+    y_test = test['director']
+    y_pred = lr.predict(embeddings[test.index])
+
+    print(classification_report(y_test, y_pred, zero_division=0))
+
     train.to_pickle('data/train_df.pkl')
     test.to_pickle('data/test_df.pkl')
-
-    train = train.reset_index(drop=True)
-    test = test.reset_index(drop=True)
-    classifier(train, test, train_embeddings, test_embeddings)
+    np.save('model/train_embeddings.npy', embeddings[train.index])
+    np.save('model/test_embeddings.npy', embeddings[test.index])

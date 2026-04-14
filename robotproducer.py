@@ -10,7 +10,7 @@ embeddings = np.load('model/train_embeddings.npy')
 with open('data/train_df.pkl', 'rb') as f:
     df = pickle.load(f)
 
-with open('model/director_classifier.sav', 'rb') as f:
+with open('model/cross_classifier.sav', 'rb') as f:
     clf = pickle.load(f)
 
 def evaluate():
